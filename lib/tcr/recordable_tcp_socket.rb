@@ -10,9 +10,10 @@ module TCR
     def initialize(address, port, cassette)
       raise TCR::NoCassetteError.new unless TCR.cassette
 
-      @read_lock = Queue.new
+      @read_lock = []
       @recording = cassette.next_session
       @live = cassette.recording?
+      @config_block_for_reads = TCR.configuration.block_for_reads
 
       if live
         begin
@@ -39,7 +40,7 @@ module TCR
       _read(:gets, *args)
     end
 
-    def read_nonblock(*args)
+    def read_nonblock(*args, **_rest)
       _read(:read_nonblock, *args, blocking: false)
     end
 
@@ -50,6 +51,18 @@ module TCR
     def write(str)
       _write(:write, str)
       str.length
+    end
+
+    def write_nonblock(str, *_rest)
+      _write(:write_nonblock, str)
+      str.length
+    end
+
+    def ssl_version
+    end
+
+    def cipher
+      {}
     end
 
     def to_io
@@ -79,6 +92,8 @@ module TCR
 
     private
 
+    attr_reader :config_block_for_reads
+
     def check_recording_for_errors
       raise Marshal.load(recording.first.last) if recording.first.first == "error"
     end
@@ -106,28 +121,25 @@ module TCR
         recording << ["write", data.dup]
       else
         direction, data = recording.shift
-        _ensure_direction("write", direction)
+        _ensure_direction("write", direction) if direction
         _check_for_blocked_reads
       end
     end
 
-    def _read(method, *args)
-      blocking = true
-      if args.last.is_a?(::Hash)
-        blocking = args.pop.fetch(:blocking, true)
-      end
-
+    def _read(method, *args, blocking: true)
       if live
           data    = @socket.__send__(method, *args)
           payload = data.dup if !data.is_a?(Symbol)
           recording << ["read", payload]
       else
-        _block_for_read_data if blocking && TCR.configuration.block_for_reads
+        _block_for_read_data if blocking && config_block_for_reads
         raise EOFError if recording.empty?
         direction, data = recording.shift
         _ensure_direction("read", direction)
       end
       data
+    rescue IO::EAGAINWaitReadable, OpenSSL::SSL::SSLErrorWaitReadable
+      retry
     end
 
     def _ensure_direction(desired, actual)
